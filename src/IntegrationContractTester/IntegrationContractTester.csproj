@@ -12,10 +12,14 @@
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/JSP-IT/integration-contract-tester</PackageProjectUrl>
     <RepositoryUrl>https://github.com/JSP-IT/integration-contract-tester</RepositoryUrl>
-    <PackageTags>dotnet;openapi;api-testing;contract-testing;json-schema</PackageTags>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>openapi;openapi3;json-schema;contract-testing;api-testing;api-compatibility;breaking-changes;dotnet-tool;cli;ci</PackageTags>
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>ict</ToolCommandName>
     <PackageReadmeFile>README.md</PackageReadmeFile>
+    <!-- Let the tool run on newer .NET major versions when .NET 10 is not installed. -->
+    <RollForward>Major</RollForward>
+    <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.OpenApi.Readers" Version="1.6.31" />
@@ -23,5 +27,6 @@
   <ItemGroup>
     <InternalsVisibleTo Include="IntegrationContractTester.Tests" />
     <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\THIRD-PARTY-NOTICES.md" Pack="true" PackagePath="\" />
   </ItemGroup>
 </Project>

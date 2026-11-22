@@ -50,8 +50,8 @@ public sealed class ContractComparerTests
     [Fact]
     public void UnsupportedSchemaFeaturesAreReportedAsWarnings()
     {
-        var baselinePath = WriteTempFile("""{"type":"string","format":"email"}""");
-        var candidatePath = WriteTempFile("""{"type":"string","format":"uri"}""");
+        var baselinePath = WriteTempFile("""{"type":"string","format":"email","maxLength":10}""");
+        var candidatePath = WriteTempFile("""{"type":"string","format":"uri","maxLength":10}""");
 
         try
         {
@@ -62,8 +62,48 @@ public sealed class ContractComparerTests
             Assert.Contains(findings, finding =>
                 finding.Code == "UNSUPPORTED_SCHEMA_FEATURE"
                 && finding.Severity == FindingSeverity.Warning
-                && finding.Message.Contains("format", StringComparison.Ordinal));
-            Assert.Contains(findings, finding => finding.Code == "FORMAT_CHANGED");
+                && finding.Message.Contains("maxLength", StringComparison.Ordinal));
+            Assert.Contains(findings, finding =>
+                finding.Code == "FORMAT_CHANGED" && finding.Severity == FindingSeverity.Warning);
+        }
+        finally
+        {
+            File.Delete(baselinePath);
+            File.Delete(candidatePath);
+        }
+    }
+
+    [Fact]
+    public void UnchangedFormatDoesNotProduceWarnings()
+    {
+        var path = WriteTempFile("""{"type":"string","format":"email"}""");
+
+        try
+        {
+            var contract = ContractReader.Read(path, "json-schema");
+            Assert.Empty(ContractComparer.Compare(contract, contract));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void JsonSchemaRequestEnumValueRemovalIsBreaking()
+    {
+        var baselinePath = WriteTempFile("""{"type":"string","enum":["a","b"]}""");
+        var candidatePath = WriteTempFile("""{"type":"string","enum":["a"]}""");
+
+        try
+        {
+            var findings = ContractComparer.Compare(
+                ContractReader.Read(baselinePath, "json-schema"),
+                ContractReader.Read(candidatePath, "json-schema"));
+
+            var finding = Assert.Single(findings);
+            Assert.Equal("ENUM_VALUE_REMOVED", finding.Code);
+            Assert.Equal(FindingSeverity.Breaking, finding.Severity);
         }
         finally
         {

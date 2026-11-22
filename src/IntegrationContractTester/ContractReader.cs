@@ -1,11 +1,17 @@
+using System.Globalization;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using IntegrationContractTester.Models;
+using Microsoft.OpenApi.Any;
+using Microsoft.OpenApi.Exceptions;
 using Microsoft.OpenApi.Models;
 using Microsoft.OpenApi.Readers;
+using Microsoft.OpenApi.Readers.Exceptions;
+using Microsoft.OpenApi.Writers;
 
 namespace IntegrationContractTester;
 
-internal static class ContractReader
+internal static partial class ContractReader
 {
     private static readonly HashSet<string> KnownJsonSchemaKeywords = new(StringComparer.Ordinal)
     {
@@ -38,10 +44,24 @@ internal static class ContractReader
             ReferenceResolution = ReferenceResolutionSetting.ResolveLocalReferences
         };
         var reader = new OpenApiStreamReader(settings);
-        var document = reader.Read(stream, out var diagnostic);
+        OpenApiDocument document;
+        OpenApiDiagnostic diagnostic;
+        try
+        {
+            document = reader.Read(stream, out diagnostic);
+        }
+        catch (Exception exception) when (exception is OpenApiException or OpenApiUnsupportedSpecVersionException)
+        {
+            // For example, OpenAPI 3.1 documents, which this version does not support.
+            throw new InvalidDataException(exception.Message, exception);
+        }
+
         if (diagnostic.Errors.Count > 0)
         {
-            throw new InvalidDataException($"The OpenAPI document contains {diagnostic.Errors.Count} parsing error(s).");
+            var first = diagnostic.Errors[0];
+            var pointer = string.IsNullOrEmpty(first.Pointer) ? string.Empty : $" at {first.Pointer}";
+            throw new InvalidDataException(
+                $"The OpenAPI document contains {diagnostic.Errors.Count} parsing error(s). First error{pointer}: {first.Message}");
         }
 
         var contract = new ApiContract();
@@ -58,21 +78,31 @@ internal static class ContractReader
 
         foreach (var (pathName, pathItem) in document.Paths)
         {
+            var (normalizedPath, pathParameterNames) = NormalizePathTemplate(pathName);
             foreach (var (method, operation) in pathItem.Operations)
             {
-                var key = $"{method.ToString().ToUpperInvariant()} {pathName}";
-                var item = new OperationContract();
+                var methodName = method.ToString().ToUpperInvariant();
+                var key = $"{methodName} {normalizedPath}";
+                var displayName = $"{methodName} {pathName}";
+                var item = new OperationContract { DisplayName = displayName };
+                if (contract.Operations.TryGetValue(key, out var existing))
+                {
+                    contract.Warnings.Add(
+                        $"{displayName} and {existing.DisplayName} have equivalent path templates; only the last one was compared.");
+                }
+
                 if (operation.Security.Count > 0)
                 {
-                    contract.Warnings.Add($"{key} declares security requirements; authentication compatibility is not compared.");
+                    contract.Warnings.Add($"{displayName} declares security requirements; authentication compatibility is not compared.");
                 }
 
                 foreach (var parameter in pathItem.Parameters.Concat(operation.Parameters)
-                    .GroupBy(parameter => $"{parameter.In}:{parameter.Name}", StringComparer.Ordinal)
+                    .GroupBy(parameter => ParameterKey(parameter, pathParameterNames), StringComparer.Ordinal)
                     .Select(group => group.Last()))
                 {
-                    item.Parameters[$"{parameter.In}:{parameter.Name}"] =
+                    item.Parameters[ParameterKey(parameter, pathParameterNames)] =
                         new ParameterContract(
+                            $"{parameter.In}:{parameter.Name}",
                             parameter.Required,
                             ConvertOpenApiSchema(parameter.Schema, new HashSet<OpenApiSchema>()),
                             $"{parameter.Style}|{parameter.Explode}|{parameter.AllowReserved}");
@@ -81,7 +111,7 @@ internal static class ContractReader
                 if (operation.RequestBody is not null)
                 {
                     item.RequestBodyRequired = operation.RequestBody.Required;
-                    item.RequestBody = ReadOpenApiContent(operation.RequestBody.Content, contract, $"{key} request");
+                    item.RequestBody = ReadOpenApiContent(operation.RequestBody.Content, contract, $"{displayName} request");
                     item.RequestBody ??= UnsupportedSchema("request body has no comparable JSON schema");
                 }
 
@@ -89,10 +119,10 @@ internal static class ContractReader
                 {
                     if (response.Headers.Count > 0)
                     {
-                        contract.Warnings.Add($"{key} response {status} declares headers; response header compatibility is not compared.");
+                        contract.Warnings.Add($"{displayName} response {status} declares headers; response header compatibility is not compared.");
                     }
 
-                    item.Responses[status] = ReadOpenApiContent(response.Content, contract, $"{key} response {status}");
+                    item.Responses[status] = ReadOpenApiContent(response.Content, contract, $"{displayName} response {status}");
                 }
 
                 contract.Operations[key] = item;
@@ -100,6 +130,54 @@ internal static class ContractReader
         }
 
         return contract;
+    }
+
+    /// <summary>
+    /// Replaces path parameter names with an empty placeholder, because OpenAPI treats templates that differ only
+    /// in parameter names as the same path and clients do not see the names.
+    /// </summary>
+    private static (string NormalizedPath, List<string> ParameterNames) NormalizePathTemplate(string path)
+    {
+        var names = new List<string>();
+        var normalized = PathParameterPattern().Replace(path, match =>
+        {
+            names.Add(match.Groups[1].Value);
+            return "{}";
+        });
+        return (normalized, names);
+    }
+
+    private static string ParameterKey(OpenApiParameter parameter, List<string> pathParameterNames)
+    {
+        if (parameter.In == ParameterLocation.Path)
+        {
+            var position = pathParameterNames.IndexOf(parameter.Name);
+            if (position >= 0)
+            {
+                return $"path:#{position}";
+            }
+        }
+
+        // HTTP header field names are case-insensitive.
+        return parameter.In == ParameterLocation.Header
+            ? $"header:{parameter.Name.ToLowerInvariant()}"
+            : $"{parameter.In}:{parameter.Name}";
+    }
+
+    [GeneratedRegex(@"\{([^{}/]+)\}", RegexOptions.CultureInvariant)]
+    private static partial Regex PathParameterPattern();
+
+    /// <summary>
+    /// Serializes an OpenAPI literal as compact JSON so that enum values compare by value, consistent with the
+    /// raw JSON text used for JSON Schema enums.
+    /// </summary>
+    private static string ToComparableJson(IOpenApiAny value)
+    {
+        using var text = new StringWriter(CultureInfo.InvariantCulture);
+        var writer = new OpenApiJsonWriter(text, new OpenApiJsonWriterSettings { Terse = true });
+        writer.WriteAny(value);
+        writer.Flush();
+        return text.ToString();
     }
 
     private static SchemaContract? ReadOpenApiContent(
@@ -166,7 +244,7 @@ internal static class ContractReader
             }
             if (source.Enum.Count > 0)
             {
-                result.EnumValues = source.Enum.Select(value => value.ToString() ?? string.Empty).ToHashSet(StringComparer.Ordinal);
+                result.EnumValues = source.Enum.Select(ToComparableJson).ToHashSet(StringComparer.Ordinal);
             }
 
             foreach (var required in source.Required)
@@ -223,7 +301,7 @@ internal static class ContractReader
 
         var contract = new ApiContract();
         var schema = ConvertJsonSchema(document.RootElement);
-        contract.Operations["JSON SCHEMA /"] = new OperationContract { RequestBody = schema };
+        contract.Operations["JSON SCHEMA /"] = new OperationContract { DisplayName = "JSON Schema", RequestBody = schema };
         return contract;
     }
 
@@ -351,9 +429,10 @@ internal static class ContractReader
             }
         }
 
+        // 'format' is not listed: format changes are reported separately as FORMAT_CHANGED warnings.
         foreach (var keyword in new[]
         {
-            "format", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
+            "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
             "minLength", "maxLength", "pattern", "minItems", "maxItems", "uniqueItems", "contains"
         })
         {

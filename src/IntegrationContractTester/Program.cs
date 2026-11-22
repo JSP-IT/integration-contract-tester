@@ -1,3 +1,4 @@
+using System.Reflection;
 using IntegrationContractTester.Models;
 
 namespace IntegrationContractTester;
@@ -6,31 +7,71 @@ internal static class Program
 {
     public static int Main(string[] args)
     {
-        if (args.Length == 0 || args[0] is "--help" or "-h" or "help")
+        if (args.Length == 0)
         {
-            PrintUsage();
-            return args.Length == 0 ? 2 : 0;
+            PrintUsage(Console.Error);
+            return 2;
         }
 
-        if (args[0] != "compare" || args.Length < 3)
+        if (args[0] is "--help" or "-h" or "help")
         {
-            PrintUsage();
+            PrintUsage(Console.Out);
+            return 0;
+        }
+
+        if (args[0] is "--version")
+        {
+            Console.WriteLine(GetVersion());
+            return 0;
+        }
+
+        if (args[0] != "compare")
+        {
+            Console.Error.WriteLine($"Unknown command: {args[0]}");
+            PrintUsage(Console.Error);
             return 2;
         }
 
         var format = "openapi";
-        for (var index = 3; index < args.Length; index++)
+        var files = new List<string>();
+        var onlyFilesFollow = false;
+        for (var index = 1; index < args.Length; index++)
         {
-            if (args[index] == "--format" && index + 1 < args.Length)
+            var argument = args[index];
+            if (onlyFilesFollow || !argument.StartsWith('-') || argument == "-")
+            {
+                files.Add(argument);
+            }
+            else if (argument == "--")
+            {
+                onlyFilesFollow = true;
+            }
+            else if (argument is "--help" or "-h")
+            {
+                PrintUsage(Console.Out);
+                return 0;
+            }
+            else if (argument == "--format" && index + 1 < args.Length)
             {
                 format = args[++index].ToLowerInvariant();
             }
+            else if (argument.StartsWith("--format=", StringComparison.Ordinal))
+            {
+                format = argument["--format=".Length..].ToLowerInvariant();
+            }
             else
             {
-                Console.Error.WriteLine($"Invalid option or missing value: {args[index]}");
-                PrintUsage();
+                Console.Error.WriteLine($"Invalid option or missing value: {argument}");
+                PrintUsage(Console.Error);
                 return 2;
             }
+        }
+
+        if (files.Count != 2)
+        {
+            Console.Error.WriteLine($"Expected a baseline and a candidate file, but got {files.Count} file argument(s).");
+            PrintUsage(Console.Error);
+            return 2;
         }
 
         if (format is not ("openapi" or "json-schema"))
@@ -41,10 +82,10 @@ internal static class Program
 
         try
         {
-            var baseline = ContractReader.Read(args[1], format);
-            var candidate = ContractReader.Read(args[2], format);
+            var baseline = ContractReader.Read(files[0], format);
+            var candidate = ContractReader.Read(files[1], format);
             var findings = ContractComparer.Compare(baseline, candidate);
-            PrintReport(args[1], args[2], findings);
+            PrintReport(files[0], files[1], findings);
             return findings.Any(finding => finding.Severity == FindingSeverity.Breaking) ? 1 : 0;
         }
         catch (FileNotFoundException exception)
@@ -77,6 +118,20 @@ internal static class Program
             Console.Error.WriteLine($"Input error: {exception.Message}");
             return 2;
         }
+        catch (Exception exception)
+        {
+            // Keep the documented exit-code contract: never let an unexpected failure look like exit code 1 or 0.
+            Console.Error.WriteLine($"Unexpected error ({exception.GetType().Name}): {exception.Message}");
+            return 2;
+        }
+    }
+
+    private static string GetVersion()
+    {
+        var version = typeof(Program).Assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "unknown";
+        var metadataStart = version.IndexOf('+', StringComparison.Ordinal);
+        return metadataStart >= 0 ? version[..metadataStart] : version;
     }
 
     private static void PrintReport(string baseline, string candidate, IReadOnlyList<Finding> findings)
@@ -114,10 +169,12 @@ internal static class Program
                 : "Compatibility result: NO BREAKING CHANGES DETECTED");
     }
 
-    private static void PrintUsage()
+    private static void PrintUsage(TextWriter output)
     {
-        Console.WriteLine("Integration Contract Tester");
-        Console.WriteLine("Usage: ict compare <baseline> <candidate> [--format openapi|json-schema]");
-        Console.WriteLine("The format defaults to openapi. JSON Schema input requires --format json-schema.");
+        output.WriteLine($"Integration Contract Tester {GetVersion()}");
+        output.WriteLine("Usage: ict compare <baseline> <candidate> [--format openapi|json-schema]");
+        output.WriteLine("       ict --version");
+        output.WriteLine("The format defaults to openapi. JSON Schema input requires --format json-schema.");
+        output.WriteLine("Exit codes: 0 = no breaking changes, 1 = breaking changes found, 2 = invalid input or usage.");
     }
 }

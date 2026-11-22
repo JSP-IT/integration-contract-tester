@@ -9,21 +9,33 @@ Integration Contract Tester is a local .NET command-line tool that compares API 
 
 ## Install
 
-Install the published .NET tool:
+The tool is distributed as a .NET tool package attached to each [GitHub Release](https://github.com/JSP-IT/integration-contract-tester/releases). Download the `.nupkg` file from the release, then install it from the download folder:
 
 ```shell
-dotnet tool install --global JspIt.IntegrationContractTester --version 0.1.0
+dotnet tool install --global JspIt.IntegrationContractTester --version 0.1.0 --add-source ./downloads
+ict --version
+```
+
+With the GitHub CLI, the download and install steps are:
+
+```shell
+gh release download v0.1.0 --repo JSP-IT/integration-contract-tester --pattern "*.nupkg" --dir ./downloads
+dotnet tool install --global JspIt.IntegrationContractTester --version 0.1.0 --add-source ./downloads
+```
+
+To pin the tool for a repository or CI job, install it into a local tool manifest instead:
+
+```shell
+dotnet new tool-manifest
+dotnet tool install JspIt.IntegrationContractTester --version 0.1.0 --add-source ./downloads
+dotnet tool run ict compare baseline.yaml candidate.yaml
 ```
 
 Or build and run from a source checkout:
 
 ```shell
-dotnet restore
-dotnet build --configuration Release
 dotnet run --project src/IntegrationContractTester -- compare examples/openapi-v1.json examples/openapi-v2.json
 ```
-
-The NuGet tool package is intended for the v0.1.0 release. Until that package is published, use the source-checkout commands above.
 
 ## Compare API versions
 
@@ -31,7 +43,15 @@ The NuGet tool package is intended for the v0.1.0 release. Until that package is
 ict compare baseline.yaml candidate.yaml
 ```
 
-OpenAPI is the default format. JSON and YAML OpenAPI documents are supported. The report lists each finding as `BREAKING`, `NON-BREAKING`, or `WARNING`; the process exits with `1` when a confirmed breaking change is found, `0` when none is found, and `2` for invalid input or command usage.
+OpenAPI 3.0 is the default format, in JSON or YAML. OpenAPI 3.1 documents are not yet supported and are rejected as invalid input. Options may appear before or after the file arguments, and `--format json-schema` can also be written as `--format=json-schema`.
+
+The report lists each finding as `BREAKING`, `NON-BREAKING`, or `WARNING`. Exit codes:
+
+| Code | Meaning |
+| --- | --- |
+| `0` | No confirmed breaking changes (warnings may still need review). |
+| `1` | At least one breaking change was found. |
+| `2` | Invalid input, unreadable file, or incorrect command usage. |
 
 Example:
 
@@ -39,14 +59,27 @@ Example:
 ict compare examples/openapi-v1.json examples/openapi-v2.json
 ```
 
-Expected report (shortened):
+Report:
 
 ```text
+Contract comparison: openapi-v1.json -> openapi-v2.json
+
 [BREAKING] RESPONSE_PROPERTY_REMOVED at GET /orders/{id} response 200.status: A response property was removed.
+[NON-BREAKING] RESPONSE_PROPERTY_ADDED at GET /orders/{id} response 200.total: A response property was added.
 [NON-BREAKING] OPTIONAL_PROPERTY_ADDED at POST /orders request body.note: An optional request property was added.
 
-Summary: 1 breaking, 0 warning(s), 1 non-breaking change(s).
+Summary: 1 breaking, 0 warning(s), 2 non-breaking change(s).
 Compatibility result: BREAKING CHANGES DETECTED
+```
+
+### Use in CI
+
+The exit code lets a pipeline fail on breaking changes. For example, in GitHub Actions, compare the contract on the pull request branch against the version on `main`:
+
+```yaml
+- run: git fetch --depth=1 origin main
+- run: git show origin/main:openapi.yaml > baseline.yaml
+- run: ict compare baseline.yaml openapi.yaml
 ```
 
 ### JSON Schema
@@ -61,12 +94,14 @@ This mode compares a schema as a request contract. OpenAPI mode compares operati
 
 ## What is compared
 
-- OpenAPI paths and HTTP methods
+- OpenAPI paths and HTTP methods (renaming a path parameter, such as `{id}` to `{orderId}`, is not reported as a change)
 - Parameter presence, requiredness, types, and enum values
 - Request body presence, requiredness, and JSON schema
 - Response status codes and JSON response schemas
 - Object properties, required properties, array items, types, and enum values
 - JSON Schema files using the same supported schema subset
+
+Changes are classified by direction. A request schema breaks clients when it accepts less than before; a response schema breaks clients when it may return something they did not expect. For example, removing an enum value is breaking in a request, while adding an enum value is breaking in a response.
 
 New optional fields, optional parameters, operations, and response codes are reported as non-breaking. Removed operations and response fields, newly required request fields, and restrictive request/response schema changes are reported as breaking.
 
@@ -86,6 +121,7 @@ The CLI reads contract files from the local filesystem and performs comparison l
 dotnet restore
 dotnet build --configuration Release
 dotnet test --configuration Release
+dotnet pack src/IntegrationContractTester --configuration Release --output artifacts
 ```
 
 ## License

@@ -20,22 +20,28 @@ internal static class ContractComparer
                 findings.Add(new Finding(
                     FindingSeverity.Breaking,
                     "OPERATION_REMOVED",
-                    operationKey,
+                    oldOperation.DisplayName,
                     "The operation is no longer present."));
                 continue;
             }
 
-            CompareParameters(operationKey, oldOperation, newOperation, findings);
-            CompareRequestBody(operationKey, oldOperation, newOperation, findings);
-            CompareResponses(operationKey, oldOperation, newOperation, findings);
+            var operationName = newOperation.DisplayName;
+            CompareParameters(operationName, oldOperation, newOperation, findings);
+            CompareRequestBody(operationName, oldOperation, newOperation, findings);
+            CompareResponses(operationName, oldOperation, newOperation, findings);
         }
 
-        foreach (var operationKey in candidate.Operations.Keys.Except(baseline.Operations.Keys, StringComparer.Ordinal))
+        foreach (var (operationKey, newOperation) in candidate.Operations)
         {
+            if (baseline.Operations.ContainsKey(operationKey))
+            {
+                continue;
+            }
+
             findings.Add(new Finding(
                 FindingSeverity.NonBreaking,
                 "OPERATION_ADDED",
-                operationKey,
+                newOperation.DisplayName,
                 "A new operation was added."));
         }
 
@@ -54,16 +60,17 @@ internal static class ContractComparer
     {
         foreach (var (parameterKey, oldParameter) in baseline.Parameters)
         {
-            var location = $"{operationKey} parameter {parameterKey}";
             if (!candidate.Parameters.TryGetValue(parameterKey, out var newParameter))
             {
                 findings.Add(new Finding(
                     FindingSeverity.Breaking,
                     "PARAMETER_REMOVED",
-                    location,
+                    $"{operationKey} parameter {oldParameter.DisplayName}",
                     "A parameter accepted by the previous contract was removed."));
                 continue;
             }
+
+            var location = $"{operationKey} parameter {newParameter.DisplayName}";
 
             if (!oldParameter.Required && newParameter.Required)
             {
@@ -104,7 +111,7 @@ internal static class ContractComparer
             findings.Add(new Finding(
                 parameter.Required ? FindingSeverity.Breaking : FindingSeverity.NonBreaking,
                 parameter.Required ? "REQUIRED_PARAMETER_ADDED" : "OPTIONAL_PARAMETER_ADDED",
-                $"{operationKey} parameter {parameterKey}",
+                $"{operationKey} parameter {parameter.DisplayName}",
                 parameter.Required
                     ? "A new required parameter prevents existing clients from calling the operation unchanged."
                     : "An optional parameter was added."));
@@ -274,9 +281,11 @@ internal static class ContractComparer
             {
                 findings.Add(new Finding(
                     FindingSeverity.NonBreaking,
-                    "SCHEMA_TYPE_WIDENED",
+                    direction == SchemaDirection.Request ? "SCHEMA_TYPE_WIDENED" : "RESPONSE_TYPE_NARROWED",
                     location,
-                    "The schema now permits a wider set of value types."));
+                    direction == SchemaDirection.Request
+                        ? "The request schema now accepts a wider set of value types."
+                        : "The response schema now returns a narrower set of value types."));
             }
         }
         else if (baseline.Types.Count != candidate.Types.Count)
@@ -297,7 +306,7 @@ internal static class ContractComparer
             {
                 findings.Add(new Finding(
                     FindingSeverity.Breaking,
-                    "ENUM_VALUE_REMOVED",
+                    direction == SchemaDirection.Request ? "ENUM_VALUE_REMOVED" : "RESPONSE_ENUM_VALUE_ADDED",
                     location,
                     direction == SchemaDirection.Request
                         ? "One or more values accepted by the previous request enum are no longer accepted."
@@ -307,9 +316,11 @@ internal static class ContractComparer
             {
                 findings.Add(new Finding(
                     FindingSeverity.NonBreaking,
-                    "ENUM_VALUE_ADDED",
+                    direction == SchemaDirection.Request ? "ENUM_VALUE_ADDED" : "RESPONSE_ENUM_VALUE_REMOVED",
                     location,
-                    "The enum now permits additional values."));
+                    direction == SchemaDirection.Request
+                        ? "The request enum now accepts additional values."
+                        : "The response enum now returns a subset of the previous values."));
             }
         }
         else if ((baseline.EnumValues is null) != (candidate.EnumValues is null))
