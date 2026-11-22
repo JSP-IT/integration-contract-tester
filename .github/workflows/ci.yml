@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "release/**"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Build and test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet restore IntegrationContractTester.sln
+      - run: dotnet build IntegrationContractTester.sln --configuration Release --no-restore
+      - run: dotnet test IntegrationContractTester.sln --configuration Release --no-build --logger "console;verbosity=normal"
+
+  package:
+    name: Pack and smoke-test tool
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet pack src/IntegrationContractTester --configuration Release --output artifacts
+      - name: Install packed tool and run example
+        shell: bash
+        run: |
+          dotnet tool install --tool-path artifacts/tool --add-source artifacts JspIt.IntegrationContractTester
+          artifacts/tool/ict --version
+          set +e
+          artifacts/tool/ict compare examples/openapi-v1.json examples/openapi-v2.json
+          status=$?
+          set -e
+          if [ "$status" -ne 1 ]; then
+            echo "Expected exit code 1 for the breaking-change example, got $status."
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nupkg
+          path: artifacts/*.nupkg
+          if-no-files-found: error
